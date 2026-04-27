@@ -98,13 +98,14 @@ Admin manually updates the Google Sheet when a unit is returned in person (walk-
 | Layer | Tool |
 |---|---|
 | **Automation Orchestrator** | [n8n](https://n8n.io) (self-hosted) |
-| **Customer Channel** | WhatsApp Business API |
+| **Customer Channel** | WAHA API |
 | **Order Intake** | [Tally.so](https://tally.so) (webhook form) |
 | **Payment Gateway** | [iPaymu](https://ipaymu.com) |
 | **Database** | PostgreSQL |
 | **Admin Dashboard / Inventory** | Google Sheets |
 | **Documentation** | Notion |
 
+> **Note :** Used third-party WA gateway (Waha) as a cost-effective alternative to official API — a pragmatic choice for UMKM-scale operations.
 ---
 
 ## 🗄️ Database Schema (Simplified)
