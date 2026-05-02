@@ -52,8 +52,8 @@ Subflow B: Order Intake — customer submits form (Tally.so) →
   to PAID status                          in PostgreSQL & Google Sheets
                │
         Subflow E (Admin):
-  Admin updates Google Sheet for
-  stock returns → auto-synced to PostgreSQL
+  Admin updates Google Sheet during
+  scheduled batch windows → auto-synced to PostgreSQL
 ```
 
 ---
@@ -68,7 +68,7 @@ The system is broken into **5 independent subflows**, each responsible for a sin
 | **B** | Order Processing | Tally.so form submission (Webhook) | Validate order, insert to DB, generate & send iPaymu payment link |
 | **C** | Payment Confirmation | iPaymu payment webhook | Update order status to `PAID` in PostgreSQL & Google Sheets |
 | **D** | Auto-Cancellation | n8n Cron (scheduled) | Cancel unpaid orders older than 24 hours, update status to `CANCELED` |
-| **E** | Inventory Sync | Google Sheets change | Sync admin stock updates (e.g., walk-in returns) from Sheet to PostgreSQL |
+| **E** | Inventory Sync | n8n Cron (every 15 min) | Sync admin stock updates from Google Sheet to PostgreSQL |
 
 ---
 
@@ -87,9 +87,34 @@ All status updates (PAID, CANCELED) are written to **both** PostgreSQL (source o
 A cron-triggered subflow queries the database for orders with status `PENDING` older than 24 hours and bulk-updates them to `CANCELED`, freeing up inventory automatically.
 
 ### Intentional Design Decision — Manual Walk-In Stock Returns
-Admin manually updates the Google Sheet when a unit is returned in person (walk-in). This was a deliberate choice: at UMKM scale, a lightweight spreadsheet update is simpler and more reliable than an additional confirmation layer. Subflow E auto-syncs any Sheet changes to PostgreSQL within minutes.
+Admin manually updates the Google Sheet when a unit is returned in person (walk-in). This was a deliberate choice: at UMKM scale, a lightweight spreadsheet update is simpler and more reliable than an additional confirmation layer. Subflow E auto-syncs any Sheet changes to PostgreSQL on a scheduled interval.
 
 > **Future Enhancement Considered:** A Telegram bot confirmation flow for walk-in returns (admin sends a command → bot updates DB directly), eliminating the Sheet dependency for this edge case.
+
+---
+
+## 🧠 Architecture Decisions
+
+This section documents key design choices that deviate from the "technically optimal" path — and the reasoning behind each.
+
+### Subflow E: Scheduled Polling over Reactive Webhook
+
+**Decision:** Subflow E uses a scheduled cron trigger (every 15 minutes) instead of a reactive webhook or event-driven trigger.
+
+**Alternatives considered:**
+
+- **Reactive webhook via Google Apps Script `onEdit`** — Fires immediately on any cell change, but creates cascading problems: workflows trigger mid-edit before data is complete, and Apps Script time-based triggers accumulate with each edit session, eventually exhausting the 20-trigger quota and causing silent sync failures.
+- **High-frequency polling (every 5 minutes)** — Functionally acceptable, but generates ~288 VPS executions/day regardless of whether any data changed — wasteful at UMKM scale.
+
+**Why scheduled polling won:**
+
+At UMKM operational scale (~50–150 orders/day), inventory updates are not continuous — they happen in discrete bursts, typically when units are returned. Rather than optimizing for sub-minute sync latency that isn't operationally needed, the system aligns the sync window with a human-defined batch cadence (e.g., 9 AM and 4 PM update windows).
+
+This is a deliberate application of the **batch processing window** pattern: sync timing is defined by operational rhythm, not by system capability. The result is a predictable, debuggable system with no hidden state — at the cost of a sync delay that is fully acceptable at this scale.
+
+**Tradeoff explicitly accepted:** A stock update made at 9:01 AM may not reflect in PostgreSQL until ~9:15 AM. This is documented and communicated to the admin as part of standard operating procedure.
+
+> **Future Enhancement:** If operational scale grows and real-time inventory accuracy becomes critical, this subflow can be upgraded to a webhook-based trigger with a debounce mechanism — without affecting any other subflow.
 
 ---
 
@@ -98,14 +123,15 @@ Admin manually updates the Google Sheet when a unit is returned in person (walk-
 | Layer | Tool |
 |---|---|
 | **Automation Orchestrator** | [n8n](https://n8n.io) (self-hosted) |
-| **Customer Channel** | WAHA API |
+| **Customer Channel** | Evolution API |
 | **Order Intake** | [Tally.so](https://tally.so) (webhook form) |
 | **Payment Gateway** | [iPaymu](https://ipaymu.com) |
 | **Database** | PostgreSQL |
 | **Admin Dashboard / Inventory** | Google Sheets |
 | **Documentation** | Notion |
 
-> **Note :** Used third-party WA gateway (Waha) as a cost-effective alternative to official API — a pragmatic choice for UMKM-scale operations.
+> **Note:** Used third-party WA gateway (Evolution API) as a cost-effective alternative to the official WhatsApp Business API — a pragmatic choice for UMKM-scale operations.
+
 ---
 
 ## 🗄️ Database Schema (Simplified)
@@ -130,9 +156,9 @@ CREATE TABLE orders (
 
 -- Inventory table (synced from Google Sheets via Subflow E)
 CREATE TABLE inventory (
-    id                  SERIAL PRIMARY KEY,
-    iphone_model        VARCHAR(50) UNIQUE NOT NULL,
-    stock_available     INT DEFAULT 0,
+    id                   SERIAL PRIMARY KEY,
+    iphone_model         VARCHAR(50) UNIQUE NOT NULL,
+    stock_available      INT DEFAULT 0,
     synced_from_sheet_at TIMESTAMPTZ
 );
 ```
@@ -145,6 +171,8 @@ CREATE TABLE inventory (
 - **Dual-write tradeoffs**: Keeping PostgreSQL and Google Sheets in sync adds complexity but gives non-technical admins a familiar interface with zero training overhead.
 - **Subflow modularity pays off**: Isolating each business domain into its own subflow made debugging significantly faster — a bug in payment confirmation never touched the chatbot logic.
 - **Designing for the actual user**: At UMKM scale, "good enough + simple" often outperforms "perfect + complex". The manual walk-in return process is a direct result of this principle.
+- **Batch processing windows beat reactive complexity**: Not every system needs to react in real time. When the operational cadence is human-paced, aligning sync windows to human routines produces a more predictable and maintainable system than chasing sub-second reactivity.
+- **Reactive triggers can introduce hidden failure modes**: Evaluated Google Apps Script `onEdit` webhooks as an alternative for Subflow E — discovered that time-based trigger accumulation creates a silent quota exhaustion risk that is difficult to debug. Scheduled polling with a longer interval is less "smart" but far more observable and reliable.
 
 ---
 
